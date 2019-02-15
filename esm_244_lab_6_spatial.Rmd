@@ -1,0 +1,311 @@
+---
+title: "ESM 244 | Lab 6 | Spatial"
+author: "Hanna Buechi"
+date: "2/14/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Goals: 
+
+- Read in spatial data (shapefiles)
+- Simplify polygons (st_simplify)
+- Add and transform projection (st_transform and st_crs)
+- Create several finalized-ish maps in R
+- Join spatial data (st_join)
+- Find spatial intersections (st_intersect)
+- Interactive plots with tmap
+- Updating color schemes, base layers, etc.
+- Plotting spatial lines
+- Creating sf data from lat/lon coordinates
+
+Awesome resource: 
+*Geocomputation in R* by Robin Lovelace, available online: 
+<https://geocompr.robinlovelace.net/>
+
+```{r}
+library(tidyverse)
+library(sf)
+library(tmap)
+library(leaflet)
+library(ggrepel)
+library(ggspatial)
+library(RColorBrewer)
+library(raster)
+```
+
+Important files in a spatial dataset:
+
+.shp - geometries
+.dbf - attributes
+.prj - projections
+
+Not all datasets will come with all of these. For example, we may have to create a projection file.
+
+
+###Example 1. Dams in California
+
+This data includes point location of dams and attributes associated with them: ownership, capacity, height of dam, downstream hazard, etc.
+
+####Read in data
+```{r eco_regions}
+
+ca_eco <- read_sf(".", layer = "ca_eco") %>% # "." means get this from the current working directory
+  dplyr::select(US_L3NAME) %>% # if we view ca_eco, we see those column titles - this is just one of the columns for all of the attributes; sticky geometries!!!
+  rename(Region = US_L3NAME) %>% 
+  st_simplify(dTolerance = 100) %>% # larger tolerance --> lower spatial resolution to collapse more points onto single line; 100 m; makes running code faster, but should only be done at an appropriate scale
+  st_transform(crs = 4326) # transform existing projection system (st_crs() if there was no coordinate system); 4326 = WGS?
+
+st_crs(ca_eco) # check projection system
+
+```
+
+```{r county}
+
+ca_counties <- read_sf(".", layer = "california_county_shape_file")
+
+st_crs(ca_counties) = 4326 # so easy to transform projection system!!
+
+```
+
+```{r dams}
+
+ca_dams <- read_sf(".", "California_Jurisdictional_Dams") %>% 
+  rename(Condition = Condition_) # change column name
+
+ca_dams$Condition <- fct_relevel(ca_dams$Condition, "Fair", "Satisfactory", "Unsatisfactory", "Poor") # want an order that isn't alphabetical; important for data visualization!
+
+```
+
+
+MAPPPPSSSSSSSSSSSS
+```{r base_plot}
+
+plot(ca_eco) # kept only one attribute so only 1 map
+plot(ca_counties) # there are many attributes because we kept them all
+
+```
+
+
+Make a map with ggplot!
+```{r ggplot}
+
+# set number of colors for R Color Brewer
+
+color_count <- 13 # need to know how many colors we need...
+
+my_colors <- colorRampPalette(brewer.pal(10, "Set2"))(color_count) # use 10 colors from Set2 with number of color_count colors # using colorRampPalette overrides the error
+
+ggplot(ca_eco) +
+  geom_sf(aes(fill = Region),
+          color = "NA", # borders around polygons
+          show.legend = FALSE) + # gets rid of legend
+  scale_fill_manual(values = my_colors) +
+  ggtitle("Dams in California") +
+  geom_sf(data = ca_counties, # add the county borders
+          fill = NA,
+          color = "gray 30",
+          size = 0.1) +
+  geom_point(data = ca_dams,
+             aes(x = Longitude, y = Latitude),
+             size = 0.5,
+             color = "gray10",
+             alpha = 0.5) + # can color dams by attributes, too
+  coord_sf(datum = NA) +
+  theme_light()
+  
+  
+
+```
+
+
+###Example 2. Dams in the Sierra Nevada eco-region
+
+```{r subset_sn}
+
+sn <- ca_eco %>% 
+  filter(Region == "Sierra Nevada") %>% 
+  st_join(ca_dams) # join wherever data from dams and eco regions joins up
+
+ggplot(sn) + # base ggplot data, but data won't "show up" until geom_sf()
+  geom_sf(data = ca_counties, fill = "wheat3", color = "NA") + # map of California with county polygons
+  geom_sf(fill = "lemonchiffon4", color = "NA") + # don't need to remind it sn # polygons on polygons
+  geom_point(aes(x = Longitude, y = Latitude), # don't need to remind it sn + points on polygons
+             size = 0.5,
+             color = "red4")
+
+```
+
+
+###Example 3. Eco-regions for Santa Barbara County
+```{r}
+
+sb <- ca_counties %>% 
+  filter(NAME == "Santa Barbara") # each row is a different polygon and Santa Barbara Co has islands!
+
+eco_clip <- st_intersection(ca_eco, sb) # clip ca_eco by the bounds of sb
+
+ggplot(eco_clip) +
+  geom_sf(data = ca_counties, # still using basemap of california counties
+          fill = "grey90", 
+          color = "grey80",
+          size = 0.2) +
+  geom_sf(aes(fill = Region), 
+          color = "NA") +
+  scale_fill_manual(values = c("darkolivegreen2","darkolivegreen","gold2")) +
+  coord_sf(xlim = c(-121, -119), ylim = c(33.5, 35.5)) + # limit the coordinates (allison did trial-and-error)
+  geom_point(aes(x = -119.6982, y = 34.4208), size = 2) + # Santa Barbara
+  geom_text(x = -119.6982, y = 34.35, label = "Santa Barbara") +
+  theme(legend.position = c(0.5,0.15)) + # Move the legend, location in a non-cropped version of the graph... mess around with it...
+  labs(x = "", y = "", title = "Santa Barbara County Eco-Regions") +
+  theme_light()
+
+```
+
+###Example 4. Intro to interactive plots with tmap
+
+```{r}
+
+# make a tmap object that we will plot interactively
+tmap_mode("view") # run this first so that interactive map comes up
+map_sb_eco <- tm_shape(eco_clip) + # take this information and make it into an interative tmap object
+  tm_fill("Region", palette = "RdPu", alpha = 0.5) + # fill the polygons
+  tm_shape(ca_counties) +
+  tm_borders() # need this with tm_shape
+  
+# Example with a different basemap
+# leaflet::providers to see list of basemaps
+
+test_basemap <- tm_basemap("CartoDB.DarkMatter") +
+  tm_shape(eco_clip) +
+  tm_borders(col = "white") # we didn't put counties in
+
+```
+
+###Example 5. Fault lines
+
+```{r}
+
+fault_lines <- read_sf(".", layer = "GMC_str_arc") %>% 
+  st_transform(crs = 4326) %>% 
+  separate(LTYPE, into = c("syn_ant", "certainty", "direction"), sep = ",") # I've done this before!
+
+plot(fault_lines)
+
+ggplot() + # faults!!!!!
+  geom_sf(data = ca_counties, fill = "black", color = "NA") +
+  geom_sf(data = fault_lines, aes(color = syn_ant)) +
+  theme_light()
+
+# fault lines in SB County:
+
+sb_faults <- fault_lines %>% 
+  st_intersection(sb) # find fault lines in sb
+
+ggplot() +
+  geom_sf(data = sb) +
+  geom_sf(data = sb_faults, aes(color = syn_ant)) # those fault lines in SB county
+
+tm_basemap("CartoDB.DarkMatter") +
+  tm_shape(sb) +
+  tm_borders(col = "gray50", lwd = 2) +
+  tm_shape(sb_faults) +
+  tm_lines(col = "syn_ant", palette = c("orange", "purple"), lwd = 2)
+
+```
+
+
+###Example 6. Faceted maps
+
+```{r}
+
+ggplot() +
+  geom_sf(data = ca_counties, fill = "black", color = "NA") +
+  geom_sf(data = fault_lines, aes(color = syn_ant)) +
+  facet_wrap(~syn_ant) # type of faults
+
+# more examples in lab key
+
+```
+
+
+###Example 7. Making spatial points
+
+```{r sensitive_sites}
+
+ca_sites <- read_csv("cadfw_sensitive_sites.csv")
+sites_sf <- st_as_sf(ca_sites, coords = c("LONDD", "LATDD"), crs = 4326) # telling R that this is spatial data
+
+# now this is spatial! Makes sticky geometries!
+
+ggplot() +
+  geom_sf(data = ca_counties, fill = "gray40") +
+  geom_sf(data = sites_sf, aes(color = PRI_CODE), size = 0.3) # notice how the labels are in alphabetical order
+
+```
+
+
+###Example 8. Chloropleth of CA counties by NUMBER of dams in each
+
+```{r}
+
+intersection <- st_intersection(x = ca_dams, y = ca_counties)
+
+dams_per_county <- intersection %>% 
+  group_by(NAME) %>% # count all of those dams in the county
+  tally()
+
+ca_tot <- ca_counties %>% 
+  st_join(dams_per_county) %>% 
+  dplyr::select(NAME.x, n) %>%
+  rename(name = NAME.x)
+
+# Reassign NA values to zero:
+ca_tot$n[is.na(ca_tot$n)] <- 0 # this is important because there were some counties that didn't have dams or some dams that didn't have counties
+
+ggplot() +
+  geom_sf(data =ca_tot, aes(fill = n), size = 0.2) +
+  theme_minimal() +
+  scale_fill_continuous(low = "yellow", high = "red")
+
+
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
